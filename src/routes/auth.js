@@ -208,32 +208,52 @@ router.post('/firebase-login', async (req, res) => {
   const { idToken, email: clientEmail, name: clientName, photo: clientPhoto, provider: clientProvider } = req.body;
 
   try {
-    let email = clientEmail;
-    let name = clientName || 'Utilisateur Ares';
-    let photo = clientPhoto || '';
-    let provider = clientProvider === 'apple' ? 'apple' : 'google';
+    if (!idToken) {
+      return res.status(400).json({ error: 'Jeton Firebase requis.' });
+    }
 
-    // Verify token using custom Firebase verifier if token is supplied
-    if (idToken && idToken !== 'mock-token') {
+    let email;
+    let name = 'Utilisateur Ares';
+    let photo = '';
+    let provider;
+
+    if (idToken === 'mock-token') {
+      const mockLoginAllowed =
+        process.env.NODE_ENV !== 'production' &&
+        process.env.ALLOW_SOCIAL_AUTH_MOCKS === 'true';
+
+      if (!mockLoginAllowed) {
+        return res.status(401).json({ error: 'Jeton Firebase invalide.' });
+      }
+
+      if (!clientEmail) {
+        return res.status(400).json({ error: 'Email requis en mode de connexion sociale simulée.' });
+      }
+
+      email = clientEmail;
+      name = clientName || name;
+      photo = clientPhoto || photo;
+      provider = clientProvider === 'apple' ? 'apple' : 'google';
+    } else {
       try {
         const decodedToken = await verifyFirebaseToken(idToken);
         email = decodedToken.email;
         name = decodedToken.name || name;
         photo = decodedToken.picture || photo;
+
+        if (!email) {
+          return res.status(401).json({ error: 'Le jeton Firebase ne contient aucune adresse email.' });
+        }
+
         const signInProvider = decodedToken.firebase?.sign_in_provider || '';
         if (signInProvider.includes('apple')) provider = 'apple';
         else if (signInProvider.includes('google')) provider = 'google';
+        else {
+          return res.status(401).json({ error: 'Fournisseur de connexion sociale non pris en charge.' });
+        }
       } catch (err) {
         console.error('Firebase token custom verification failed:', err.message);
-        if (!email) {
-          return res.status(401).json({ error: 'Jeton Firebase invalide.' });
-        }
-      }
-    } else {
-      // Fallback/Mock Mode if firebase admin is not initialized or we pass a mock token
-      console.log('Firebase mock login fallback.');
-      if (!email) {
-        return res.status(400).json({ error: 'Email requis en mode de connexion sociale simulée.' });
+        return res.status(401).json({ error: 'Jeton Firebase invalide.' });
       }
     }
 
