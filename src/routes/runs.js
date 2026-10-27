@@ -5,6 +5,11 @@ const Run = require('../models/Run');
 const { authenticateToken } = require('../middleware/auth');
 const { deleteRunPhoto, uploadRunPhoto } = require('../run-photo-storage');
 const { calculateRunMetrics, round } = require('../utils/runCalculations');
+const {
+  hasPendingRewards,
+  processPendingRewards,
+  processRunRewards,
+} = require('../services/rewardsService');
 
 const router = express.Router();
 
@@ -12,6 +17,8 @@ const router = express.Router();
 // run saving flow is being tested.
 const MINIMUM_DISTANCE_METRES = 0;
 const MAXIMUM_DURATION_SECONDS = 7 * 24 * 60 * 60;
+// Phone clocks drift a little; a run cannot end further in the future than this.
+const MAXIMUM_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAXIMUM_PHOTO_BYTES = 12 * 1024 * 1024;
 const SUPPORTED_PHOTO_TYPES = new Set([
   'image/jpeg',
@@ -142,6 +149,10 @@ const parseRunPayload = (rawRun) => {
     throw apiError(400, 'INVALID_RUN_DATES', 'finishedAt doit être postérieur à startedAt.');
   }
 
+  if (finishedAt.getTime() > Date.now() + MAXIMUM_CLOCK_SKEW_MS) {
+    throw apiError(400, 'INVALID_RUN_DATES', 'finishedAt ne peut pas être dans le futur.');
+  }
+
   const durationSeconds = finiteNumber(payload.durationSeconds, 'durationSeconds');
   if (
     !Number.isInteger(durationSeconds) ||
@@ -152,6 +163,15 @@ const parseRunPayload = (rawRun) => {
       400,
       'INVALID_RUN_DURATION',
       'durationSeconds doit être un entier compris entre 1 seconde et 7 jours.',
+    );
+  }
+  // Active time excludes pauses, so it can be shorter than the wall-clock
+  // interval but never longer: a longer one would inflate pace-based rewards.
+  if (durationSeconds > (finishedAt - startedAt) / 1000 + 60) {
+    throw apiError(
+      400,
+      'INVALID_RUN_DURATION',
+      'durationSeconds dépasse le temps écoulé entre startedAt et finishedAt.',
     );
   }
 
@@ -227,6 +247,21 @@ const serializeRun = (run, { includeRoute = true } = {}) => {
   return serialized;
 };
 
+// Keyset cursor for the activity feed, opaque to the client.
+const encodeFeedCursor = (run) =>
+  Buffer.from(`${new Date(run.startedAt).toISOString()}|${run._id}`, 'utf8').toString('base64url');
+
+const decodeFeedCursor = (raw) => {
+  const [startedAt, id] = Buffer.from(raw, 'base64url').toString('utf8').split('|');
+  const date = new Date(startedAt);
+
+  if (Number.isNaN(date.getTime()) || !mongoose.Types.ObjectId.isValid(id)) {
+    throw apiError(400, 'INVALID_CURSOR', 'cursor est invalide.');
+  }
+
+  return { startedAt: date, id: new mongoose.Types.ObjectId(id) };
+};
+
 const sendApiError = (res, error) => {
   const status = error.status || 500;
   if (status >= 500) console.error('Erreur API courses:', error);
@@ -254,7 +289,11 @@ router.post('/', authenticateToken, receiveMultipartRun, async (req, res) => {
       clientRunId: payload.clientRunId,
     });
     if (existingRun) {
-      return res.status(200).json({ run: serializeRun(existingRun), idempotent: true });
+      // The first upload saved the run but its reward pass failed: finish it.
+      const rewards = (await hasPendingRewards(existingRun._id))
+        ? await processRunRewards(req.userDB._id, existingRun)
+        : undefined;
+      return res.status(200).json({ run: serializeRun(existingRun), rewards, idempotent: true });
     }
 
     const configuredWeight = Number(req.userDB.weight);
@@ -334,7 +373,17 @@ router.post('/', authenticateToken, receiveMultipartRun, async (req, res) => {
       throw databaseError;
     }
 
-    return res.status(201).json({ run: serializeRun(run), idempotent: false });
+    // The run is saved whatever happens next. A failed reward pass leaves it
+    // pending and is retried on the next upload instead of failing this one.
+    let processedRewards;
+    try {
+      processedRewards = await processRunRewards(req.userDB._id, run);
+      await processPendingRewards(req.userDB._id);
+    } catch (rewardsError) {
+      console.error('Récompenses non attribuées, nouvel essai au prochain envoi:', rewardsError);
+    }
+
+    return res.status(201).json({ run: serializeRun(run), rewards: processedRewards, idempotent: false });
   } catch (error) {
     // This covers future errors occurring after upload but before Run#save.
     if (uploadedPhoto?.path) {
@@ -379,6 +428,44 @@ router.get('/me/gallery', authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/runs/me?limit=20&cursor=... — the caller's own run history, newest
+// first. routePoints stay out of the list; GET /:id returns them.
+router.get('/me', authenticateToken, async (req, res) => {
+  try {
+    const rawLimit = req.query.limit === undefined ? '20' : String(req.query.limit);
+    if (!/^\d+$/.test(rawLimit)) {
+      throw apiError(400, 'INVALID_LIMIT', 'limit doit être un entier positif.');
+    }
+    const limit = Math.min(Math.max(Number(rawLimit), 1), 50);
+
+    const filter = { user: req.userDB._id };
+    if (req.query.cursor !== undefined) {
+      const cursor = decodeFeedCursor(String(req.query.cursor));
+      filter.$or = [
+        { startedAt: { $lt: cursor.startedAt } },
+        { startedAt: cursor.startedAt, _id: { $lt: cursor.id } },
+      ];
+    }
+
+    const runs = await Run.find(filter)
+      .select('-routePoints')
+      .sort({ startedAt: -1, _id: -1 })
+      .limit(limit + 1)
+      .lean();
+
+    const hasMore = runs.length > limit;
+    const page = hasMore ? runs.slice(0, limit) : runs;
+    const last = page[page.length - 1];
+
+    return res.status(200).json({
+      runs: page.map((run) => serializeRun(run, { includeRoute: false })),
+      nextCursor: hasMore && last ? encodeFeedCursor(last) : null,
+    });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
 // GET /api/runs/me/stats
 router.get('/me/stats', authenticateToken, async (req, res) => {
   try {
@@ -400,6 +487,77 @@ router.get('/me/stats', authenticateToken, async (req, res) => {
         runCount: totals?.runCount || 0,
         durationSeconds: totals?.durationSeconds || 0,
       },
+    });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// GET /api/runs/feed?limit=10&cursor=... — activity feed: the latest runs of
+// the people the caller follows, newest first. Declared before `/:id` so the
+// literal path is not swallowed by the id parameter.
+router.get('/feed', authenticateToken, async (req, res) => {
+  try {
+    const rawLimit = req.query.limit === undefined ? '10' : String(req.query.limit);
+    if (!/^\d+$/.test(rawLimit)) {
+      throw apiError(400, 'INVALID_LIMIT', 'limit doit être un entier positif.');
+    }
+    const limit = Math.min(Math.max(Number(rawLimit), 1), 30);
+
+    const following = req.userDB.following || [];
+    if (following.length === 0) {
+      return res.status(200).json({ items: [], nextCursor: null });
+    }
+
+    const filter = { user: { $in: following } };
+
+    if (req.query.cursor !== undefined) {
+      const cursor = decodeFeedCursor(String(req.query.cursor));
+      // `startedAt` is not unique across users, so the run id breaks ties:
+      // without it a page boundary could repeat or skip a run.
+      filter.$or = [
+        { startedAt: { $lt: cursor.startedAt } },
+        { startedAt: cursor.startedAt, _id: { $lt: cursor.id } },
+      ];
+    }
+
+    // routePoints is deliberately excluded: a feed page would weigh megabytes.
+    const runs = await Run.find(filter)
+      .select(
+        '_id user startedAt durationSeconds distanceMetres averageSpeedMps averagePaceSecondsPerKm caloriesKcal photo.url',
+      )
+      .sort({ startedAt: -1, _id: -1 })
+      .limit(limit + 1)
+      .populate('user', 'name pseudo photo city')
+      .lean();
+
+    const hasMore = runs.length > limit;
+    const page = hasMore ? runs.slice(0, limit) : runs;
+    const last = page[page.length - 1];
+
+    const items = page
+      // A run whose author was deleted has nothing to display.
+      .filter((run) => run.user)
+      .map((run) => ({
+        id: run._id.toString(),
+        startedAt: run.startedAt,
+        distanceMetres: run.distanceMetres,
+        durationSeconds: run.durationSeconds,
+        averagePaceSecondsPerKm: run.averagePaceSecondsPerKm,
+        caloriesKcal: run.caloriesKcal,
+        photoUrl: run.photo?.url || null,
+        author: {
+          id: run.user._id.toString(),
+          name: run.user.name || '',
+          pseudo: run.user.pseudo || '',
+          photo: run.user.photo || '',
+          city: run.user.city || '',
+        },
+      }));
+
+    return res.status(200).json({
+      items,
+      nextCursor: hasMore && last ? encodeFeedCursor(last) : null,
     });
   } catch (error) {
     return sendApiError(res, error);

@@ -3,6 +3,14 @@ const User = require('../models/User');
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 
+// The fallback is public (it is in the repository): anyone can sign a token
+// with it, including `role: 'admin'`. Production must set JWT_SECRET.
+if (!process.env.JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET doit être défini en production.');
+  }
+  console.warn('⚠️  JWT_SECRET absent : clé de développement utilisée. Ne pas déployer ainsi.');
+}
 const JWT_SECRET = process.env.JWT_SECRET || 'ares_secret_key_2026_super_secure';
 
 const generateToken = (user) => {

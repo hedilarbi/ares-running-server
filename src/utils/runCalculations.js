@@ -1,5 +1,12 @@
 const EARTH_RADIUS_METRES = 6_371_008.8;
 
+// Faster than any human runner (Bolt peaks near 12.4 m/s). Segments or point
+// speeds above it are GPS jumps or a vehicle, and must not earn distance or
+// unlock a speed badge.
+const MAXIMUM_PLAUSIBLE_SPEED_MPS = 12;
+// Two fixes stamped at the same instant cannot be more than a GPS wobble apart.
+const MAXIMUM_INSTANT_JUMP_METRES = 25;
+
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
 const round = (value, decimals = 2) => {
@@ -24,11 +31,23 @@ const haversineDistanceMetres = (from, to) => {
   return 2 * EARTH_RADIUS_METRES * Math.asin(Math.min(1, Math.sqrt(haversine)));
 };
 
+/** Whether the segment between two fixes could have been covered on foot. */
+const isPlausibleSegment = (from, to, segmentMetres) => {
+  const elapsedSeconds = (to.timestamp - from.timestamp) / 1000;
+  // Traces without timestamps (tests, imports) cannot be checked.
+  if (!Number.isFinite(elapsedSeconds)) return true;
+  if (elapsedSeconds <= 0) return segmentMetres <= MAXIMUM_INSTANT_JUMP_METRES;
+  return segmentMetres / elapsedSeconds <= MAXIMUM_PLAUSIBLE_SPEED_MPS;
+};
+
 const calculateDistanceMetres = (routePoints) => {
   let distanceMetres = 0;
 
   for (let index = 1; index < routePoints.length; index += 1) {
-    distanceMetres += haversineDistanceMetres(routePoints[index - 1], routePoints[index]);
+    const from = routePoints[index - 1];
+    const to = routePoints[index];
+    const segmentMetres = haversineDistanceMetres(from, to);
+    if (isPlausibleSegment(from, to, segmentMetres)) distanceMetres += segmentMetres;
   }
 
   return distanceMetres;
@@ -46,7 +65,11 @@ const calculateRunMetrics = ({ routePoints, durationSeconds, weightKg }) => {
     : 0;
   const maxSpeedMps = round(
     routePoints.reduce((maximum, point) => {
-      const speed = Number.isFinite(point.speed) && point.speed > 0 ? point.speed : 0;
+      const speed = Number.isFinite(point.speed) &&
+        point.speed > 0 &&
+        point.speed <= MAXIMUM_PLAUSIBLE_SPEED_MPS
+        ? point.speed
+        : 0;
       return Math.max(maximum, speed);
     }, 0),
     3,
@@ -68,6 +91,7 @@ const calculateRunMetrics = ({ routePoints, durationSeconds, weightKg }) => {
 
 module.exports = {
   EARTH_RADIUS_METRES,
+  MAXIMUM_PLAUSIBLE_SPEED_MPS,
   calculateDistanceMetres,
   calculateRunMetrics,
   haversineDistanceMetres,

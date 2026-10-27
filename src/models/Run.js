@@ -58,6 +58,11 @@ const RunSchema = new mongoose.Schema(
       required: true,
     },
     photo: { type: PhotoSchema, default: null },
+    // Set once the run's XP has been added to the user. Explicitly null until
+    // then, so a failed reward pass can be retried without paying twice. Runs
+    // saved before this field existed do not have it and are never replayed.
+    rewardsProcessedAt: { type: Date, default: null },
+    xpAwarded: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true },
 );

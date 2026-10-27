@@ -59,3 +59,21 @@ test('server metrics support a stationary run represented by one GPS point', () 
   assert.equal(metrics.averagePaceSecondsPerKm, 0);
   assert.equal(metrics.caloriesKcal, 0);
 });
+
+test('GPS jumps faster than a runner add no distance and no max speed', () => {
+  const start = 1_700_000_000_000;
+  const metrics = calculateRunMetrics({
+    routePoints: [
+      { latitude: 0, longitude: 0, timestamp: start, speed: 3 },
+      // ~111 m in 30 s: a plausible 3.7 m/s.
+      { latitude: 0, longitude: 0.001, timestamp: start + 30_000, speed: 3.5 },
+      // ~1.1 km in 2 s: a GPS jump, and a spurious 40 m/s point speed.
+      { latitude: 0, longitude: 0.011, timestamp: start + 32_000, speed: 40 },
+    ],
+    durationSeconds: 32,
+    weightKg: 70,
+  });
+
+  assert.ok(Math.abs(metrics.distanceMetres - 111.2) < 0.1);
+  assert.equal(metrics.maxSpeedMps, 3.5);
+});
