@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const multer = require('multer');
 const Run = require('../models/Run');
+const RunComment = require('../models/RunComment');
 const { authenticateToken } = require('../middleware/auth');
 const { deleteRunPhoto, uploadRunPhoto } = require('../run-photo-storage');
 const { calculateRunMetrics, round } = require('../utils/runCalculations');
@@ -20,6 +21,8 @@ const MAXIMUM_DURATION_SECONDS = 7 * 24 * 60 * 60;
 // Phone clocks drift a little; a run cannot end further in the future than this.
 const MAXIMUM_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAXIMUM_PHOTO_BYTES = 12 * 1024 * 1024;
+const MAXIMUM_DESCRIPTION_LENGTH = 500;
+const MAXIMUM_COMMENT_LENGTH = 500;
 const SUPPORTED_PHOTO_TYPES = new Set([
   'image/jpeg',
   'image/jpg',
@@ -114,6 +117,24 @@ const validDate = (value, fieldName) => {
     throw apiError(400, 'INVALID_RUN_PAYLOAD', `${fieldName} est invalide.`);
   }
   return date;
+};
+
+// Optional caption. Control characters other than line breaks are dropped.
+const parseDescription = (value) => {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') {
+    throw apiError(400, 'INVALID_DESCRIPTION', 'La description doit être un texte.');
+  }
+  // eslint-disable-next-line no-control-regex
+  const text = value.replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, '').trim();
+  if (text.length > MAXIMUM_DESCRIPTION_LENGTH) {
+    throw apiError(
+      400,
+      'DESCRIPTION_TOO_LONG',
+      `La description ne doit pas dépasser ${MAXIMUM_DESCRIPTION_LENGTH} caractères.`,
+    );
+  }
+  return text;
 };
 
 const parseRunPayload = (rawRun) => {
@@ -222,7 +243,9 @@ const parseRunPayload = (rawRun) => {
     };
   });
 
-  return { clientRunId, startedAt, finishedAt, durationSeconds, routePoints };
+  const description = parseDescription(payload.description);
+
+  return { clientRunId, startedAt, finishedAt, durationSeconds, routePoints, description };
 };
 
 const serializeRun = (run, { includeRoute = true } = {}) => {
@@ -239,6 +262,9 @@ const serializeRun = (run, { includeRoute = true } = {}) => {
     averagePaceSecondsPerKm: value.averagePaceSecondsPerKm,
     caloriesKcal: value.caloriesKcal,
     photo: value.photo || null,
+    description: value.description || '',
+    likeCount: value.likeCount || 0,
+    commentCount: value.commentCount || 0,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };
@@ -338,6 +364,7 @@ router.post('/', authenticateToken, receiveMultipartRun, async (req, res) => {
       caloriesKcal: metrics.caloriesKcal,
       routePoints: payload.routePoints,
       photo: uploadedPhoto,
+      description: payload.description,
     });
 
     try {
@@ -504,12 +531,9 @@ router.get('/feed', authenticateToken, async (req, res) => {
     }
     const limit = Math.min(Math.max(Number(rawLimit), 1), 30);
 
-    const following = req.userDB.following || [];
-    if (following.length === 0) {
-      return res.status(200).json({ items: [], nextCursor: null });
-    }
-
-    const filter = { user: { $in: following } };
+    // The caller's own runs are part of their feed, like on any social app.
+    const authors = [req.userDB._id, ...(req.userDB.following || [])];
+    const filter = { user: { $in: authors } };
 
     if (req.query.cursor !== undefined) {
       const cursor = decodeFeedCursor(String(req.query.cursor));
@@ -524,7 +548,7 @@ router.get('/feed', authenticateToken, async (req, res) => {
     // routePoints is deliberately excluded: a feed page would weigh megabytes.
     const runs = await Run.find(filter)
       .select(
-        '_id user startedAt durationSeconds distanceMetres averageSpeedMps averagePaceSecondsPerKm caloriesKcal photo.url',
+        '_id user startedAt durationSeconds distanceMetres averageSpeedMps averagePaceSecondsPerKm caloriesKcal photo.url photo.metadata.width photo.metadata.height description likeCount commentCount',
       )
       .sort({ startedAt: -1, _id: -1 })
       .limit(limit + 1)
@@ -534,6 +558,15 @@ router.get('/feed', authenticateToken, async (req, res) => {
     const hasMore = runs.length > limit;
     const page = hasMore ? runs.slice(0, limit) : runs;
     const last = page[page.length - 1];
+
+    // One indexed lookup instead of shipping every like id with the page.
+    const likedIds = new Set(
+      (
+        await Run.find({ _id: { $in: page.map((run) => run._id) }, likes: req.userDB._id })
+          .select('_id')
+          .lean()
+      ).map((run) => run._id.toString()),
+    );
 
     const items = page
       // A run whose author was deleted has nothing to display.
@@ -546,6 +579,13 @@ router.get('/feed', authenticateToken, async (req, res) => {
         averagePaceSecondsPerKm: run.averagePaceSecondsPerKm,
         caloriesKcal: run.caloriesKcal,
         photoUrl: run.photo?.url || null,
+        photoWidth: run.photo?.metadata?.width || null,
+        photoHeight: run.photo?.metadata?.height || null,
+        description: run.description || '',
+        likeCount: run.likeCount || 0,
+        likedByMe: likedIds.has(run._id.toString()),
+        commentCount: run.commentCount || 0,
+        isMine: run.user._id.equals(req.userDB._id),
         author: {
           id: run.user._id.toString(),
           name: run.user.name || '',
@@ -580,6 +620,207 @@ router.get('/:id', authenticateToken, async (req, res) => {
     }
 
     return res.status(200).json({ run: serializeRun(run) });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Social: caption, likes and comments.
+// A run can be seen, liked and commented on by its author and by the people
+// who follow the author: exactly the audience of the feed.
+// ---------------------------------------------------------------------------
+
+const assertObjectId = (value, code, message) => {
+  if (!mongoose.isObjectIdOrHexString(value)) throw apiError(400, code, message);
+};
+
+const findVisibleRun = async (runId, viewer, projection = '_id user') => {
+  assertObjectId(runId, 'INVALID_RUN_ID', "L'identifiant de la course est invalide.");
+  const run = await Run.findById(runId).select(projection).lean();
+  if (!run) throw apiError(404, 'RUN_NOT_FOUND', 'Course introuvable.');
+
+  const isOwner = run.user.equals(viewer._id);
+  const followsAuthor = (viewer.following || []).some((id) => id.equals(run.user));
+  if (!isOwner && !followsAuthor) {
+    throw apiError(403, 'RUN_NOT_VISIBLE', "Abonne-toi à ce coureur pour interagir avec sa course.");
+  }
+  return { run, isOwner };
+};
+
+const serializeComment = (comment, viewer, runOwnerId) => {
+  const author = comment.user;
+  const authorId = author?._id ?? comment.user;
+  return {
+    id: comment._id.toString(),
+    text: comment.text,
+    createdAt: comment.createdAt,
+    author: author && author._id
+      ? {
+          id: author._id.toString(),
+          name: author.name || '',
+          pseudo: author.pseudo || '',
+          photo: author.photo || '',
+        }
+      : null,
+    // The comment's author and the run's owner can delete it.
+    canDelete: Boolean(
+      authorId && (authorId.equals(viewer._id) || (runOwnerId && runOwnerId.equals(viewer._id))),
+    ),
+  };
+};
+
+// PATCH /api/runs/:id — the owner edits the caption.
+router.patch('/:id', authenticateToken, async (req, res) => {
+  try {
+    assertObjectId(req.params.id, 'INVALID_RUN_ID', "L'identifiant de la course est invalide.");
+    const description = parseDescription(req.body?.description);
+
+    const run = await Run.findOneAndUpdate(
+      { _id: req.params.id, user: req.userDB._id },
+      { $set: { description } },
+      { returnDocument: 'after' },
+    ).select('-routePoints');
+    if (!run) throw apiError(404, 'RUN_NOT_FOUND', 'Course introuvable.');
+
+    return res.status(200).json({ run: serializeRun(run, { includeRoute: false }) });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+const likeResponse = async (runId, viewerId) => {
+  const run = await Run.findById(runId).select('likeCount').lean();
+  const liked = Boolean(await Run.exists({ _id: runId, likes: viewerId }));
+  return { liked, likeCount: run?.likeCount || 0 };
+};
+
+// POST /api/runs/:id/like — idempotent: liking twice counts once.
+router.post('/:id/like', authenticateToken, async (req, res) => {
+  try {
+    const { run } = await findVisibleRun(req.params.id, req.userDB);
+    await Run.updateOne(
+      { _id: run._id, likes: { $ne: req.userDB._id } },
+      { $push: { likes: req.userDB._id }, $inc: { likeCount: 1 } },
+    );
+    return res.status(200).json(await likeResponse(run._id, req.userDB._id));
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// DELETE /api/runs/:id/like — idempotent as well.
+router.delete('/:id/like', authenticateToken, async (req, res) => {
+  try {
+    const { run } = await findVisibleRun(req.params.id, req.userDB);
+    await Run.updateOne(
+      { _id: run._id, likes: req.userDB._id },
+      { $pull: { likes: req.userDB._id }, $inc: { likeCount: -1 } },
+    );
+    return res.status(200).json(await likeResponse(run._id, req.userDB._id));
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// GET /api/runs/:id/likes — who liked the run.
+router.get('/:id/likes', authenticateToken, async (req, res) => {
+  try {
+    await findVisibleRun(req.params.id, req.userDB);
+    const run = await Run.findById(req.params.id)
+      .select('likes')
+      .populate('likes', 'name pseudo photo')
+      .lean();
+    const users = (run?.likes || []).filter(Boolean).map((user) => ({
+      id: user._id.toString(),
+      name: user.name || '',
+      pseudo: user.pseudo || '',
+      photo: user.photo || '',
+    }));
+    return res.status(200).json({ users });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// GET /api/runs/:id/comments?limit=50&after=<commentId> — oldest first.
+router.get('/:id/comments', authenticateToken, async (req, res) => {
+  try {
+    const { run } = await findVisibleRun(req.params.id, req.userDB);
+    const rawLimit = req.query.limit === undefined ? '50' : String(req.query.limit);
+    if (!/^\d+$/.test(rawLimit)) {
+      throw apiError(400, 'INVALID_LIMIT', 'limit doit être un entier positif.');
+    }
+    const limit = Math.min(Math.max(Number(rawLimit), 1), 100);
+
+    const filter = { run: run._id };
+    if (req.query.after !== undefined) {
+      assertObjectId(String(req.query.after), 'INVALID_CURSOR', 'after est invalide.');
+      filter._id = { $gt: new mongoose.Types.ObjectId(String(req.query.after)) };
+    }
+
+    const comments = await RunComment.find(filter)
+      .sort({ _id: 1 })
+      .limit(limit + 1)
+      .populate('user', 'name pseudo photo')
+      .lean();
+    const hasMore = comments.length > limit;
+    const page = hasMore ? comments.slice(0, limit) : comments;
+
+    return res.status(200).json({
+      comments: page.map((comment) => serializeComment(comment, req.userDB, run.user)),
+      nextCursor: hasMore ? page[page.length - 1]._id.toString() : null,
+    });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// POST /api/runs/:id/comments — body { text }.
+router.post('/:id/comments', authenticateToken, async (req, res) => {
+  try {
+    const { run } = await findVisibleRun(req.params.id, req.userDB);
+    const rawText = typeof req.body?.text === 'string' ? req.body.text : '';
+    // eslint-disable-next-line no-control-regex
+    const text = rawText.replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, '').trim();
+    if (!text) throw apiError(400, 'COMMENT_REQUIRED', 'Le commentaire est vide.');
+    if (text.length > MAXIMUM_COMMENT_LENGTH) {
+      throw apiError(
+        400,
+        'COMMENT_TOO_LONG',
+        `Le commentaire ne doit pas dépasser ${MAXIMUM_COMMENT_LENGTH} caractères.`,
+      );
+    }
+
+    const comment = await RunComment.create({ run: run._id, user: req.userDB._id, text });
+    await Run.updateOne({ _id: run._id }, { $inc: { commentCount: 1 } });
+    await comment.populate('user', 'name pseudo photo');
+
+    return res.status(201).json({
+      comment: serializeComment(comment.toObject(), req.userDB, run.user),
+    });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// DELETE /api/runs/:id/comments/:commentId — by its author or the run's owner.
+router.delete('/:id/comments/:commentId', authenticateToken, async (req, res) => {
+  try {
+    const { run, isOwner } = await findVisibleRun(req.params.id, req.userDB);
+    assertObjectId(req.params.commentId, 'INVALID_COMMENT_ID', "L'identifiant du commentaire est invalide.");
+
+    const filter = { _id: req.params.commentId, run: run._id };
+    if (!isOwner) filter.user = req.userDB._id;
+
+    const deleted = await RunComment.findOneAndDelete(filter);
+    if (!deleted) throw apiError(404, 'COMMENT_NOT_FOUND', 'Commentaire introuvable.');
+    await Run.updateOne(
+      { _id: run._id, commentCount: { $gt: 0 } },
+      { $inc: { commentCount: -1 } },
+    );
+
+    return res.status(200).json({ deleted: true });
   } catch (error) {
     return sendApiError(res, error);
   }

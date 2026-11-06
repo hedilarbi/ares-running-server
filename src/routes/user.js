@@ -256,6 +256,49 @@ router.get('/rankings', authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/users/:id/followers and /api/users/:id/following — the people
+// behind the counters on a profile, with whether the caller follows each one.
+const mongoose = require('mongoose');
+
+const relationList = (field) => async (req, res) => {
+  try {
+    if (!mongoose.isObjectIdOrHexString(req.params.id)) {
+      return res.status(400).json({ error: 'Identifiant invalide.' });
+    }
+
+    const target = await User.findById(req.params.id)
+      .select(field)
+      .populate(field, 'name pseudo photo city')
+      .lean();
+    if (!target) {
+      return res.status(404).json({ error: 'Utilisateur introuvable.' });
+    }
+
+    const myId = req.userDB._id.toString();
+    const myFollowing = new Set((req.userDB.following || []).map((id) => id.toString()));
+    const users = (target[field] || [])
+      // A deleted account leaves a dangling id that populates to null.
+      .filter(Boolean)
+      .map((user) => ({
+        id: user._id.toString(),
+        name: user.name || '',
+        pseudo: user.pseudo || '',
+        photo: user.photo || '',
+        city: user.city || '',
+        isMe: user._id.toString() === myId,
+        isFollowing: myFollowing.has(user._id.toString()),
+      }));
+
+    return res.status(200).json({ users });
+  } catch (error) {
+    console.error(`Erreur lors du chargement de ${field}:`, error);
+    return res.status(500).json({ error: 'Erreur serveur.' });
+  }
+};
+
+router.get('/:id/followers', authenticateToken, relationList('followers'));
+router.get('/:id/following', authenticateToken, relationList('following'));
+
 // GET /api/users/:id
 router.get('/:id', authenticateToken, async (req, res) => {
   try {

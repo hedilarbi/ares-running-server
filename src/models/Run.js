@@ -58,6 +58,16 @@ const RunSchema = new mongoose.Schema(
       required: true,
     },
     photo: { type: PhotoSchema, default: null },
+    // Text the runner adds to the post, like a caption.
+    description: { type: String, trim: true, maxlength: 500, default: '' },
+    // Who liked the run. likeCount mirrors its length so the feed does not have
+    // to load every id; both are only changed together, atomically.
+    likes: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+      default: [],
+    },
+    likeCount: { type: Number, default: 0, min: 0 },
+    commentCount: { type: Number, default: 0, min: 0 },
     // Set once the run's XP has been added to the user. Explicitly null until
     // then, so a failed reward pass can be retried without paying twice. Runs
     // saved before this field existed do not have it and are never replayed.
