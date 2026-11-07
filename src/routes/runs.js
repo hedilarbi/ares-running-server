@@ -493,6 +493,55 @@ router.get('/me', authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/runs/user/:userId?limit=10&cursor=... — another runner's run
+// history, newest first. Same audience as the feed: the runner and the people
+// who follow them. routePoints stay out of the list.
+router.get('/user/:userId', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    assertObjectId(userId, 'INVALID_USER_ID', "L'identifiant de l'utilisateur est invalide.");
+
+    const rawLimit = req.query.limit === undefined ? '10' : String(req.query.limit);
+    if (!/^\d+$/.test(rawLimit)) {
+      throw apiError(400, 'INVALID_LIMIT', 'limit doit être un entier positif.');
+    }
+    const limit = Math.min(Math.max(Number(rawLimit), 1), 30);
+
+    const viewer = req.userDB;
+    const isOwner = viewer._id.equals(userId);
+    const followsRunner = (viewer.following || []).some((id) => id.equals(userId));
+    if (!isOwner && !followsRunner) {
+      throw apiError(403, 'RUN_NOT_VISIBLE', "Abonne-toi à ce coureur pour voir ses courses.");
+    }
+
+    const filter = { user: userId };
+    if (req.query.cursor !== undefined) {
+      const cursor = decodeFeedCursor(String(req.query.cursor));
+      filter.$or = [
+        { startedAt: { $lt: cursor.startedAt } },
+        { startedAt: cursor.startedAt, _id: { $lt: cursor.id } },
+      ];
+    }
+
+    const runs = await Run.find(filter)
+      .select('-routePoints')
+      .sort({ startedAt: -1, _id: -1 })
+      .limit(limit + 1)
+      .lean();
+
+    const hasMore = runs.length > limit;
+    const page = hasMore ? runs.slice(0, limit) : runs;
+    const last = page[page.length - 1];
+
+    return res.status(200).json({
+      runs: page.map((run) => serializeRun(run, { includeRoute: false })),
+      nextCursor: hasMore && last ? encodeFeedCursor(last) : null,
+    });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
 // GET /api/runs/me/stats
 router.get('/me/stats', authenticateToken, async (req, res) => {
   try {
