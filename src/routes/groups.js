@@ -341,12 +341,8 @@ router.post('/', authenticateToken, async (req, res) => {
         error: "Le type de groupe doit être 'club' (Club de running) ou 'amis' (Groupe d'amis).",
       });
     }
-    if (!city || typeof city !== 'string' || !city.trim()) {
-      return res.status(400).json({ error: 'La ville est requise.' });
-    }
-    if (!governorate || typeof governorate !== 'string' || !governorate.trim()) {
-      return res.status(400).json({ error: 'Le gouvernorat est requis.' });
-    }
+    const cleanCity = typeof city === 'string' ? city.trim() : '';
+    const cleanGovernorate = typeof governorate === 'string' ? governorate.trim() : '';
     const groupPrivacy = privacy === 'private' ? 'private' : 'public';
 
     const group = await Group.create({
@@ -354,8 +350,8 @@ router.post('/', authenticateToken, async (req, res) => {
       description: typeof description === 'string' ? description.trim().slice(0, 500) : '',
       photo: typeof photo === 'string' ? photo : '',
       type,
-      city: city.trim(),
-      governorate: governorate.trim(),
+      city: cleanCity,
+      governorate: cleanGovernorate,
       country: req.userDB.country || 'Tunisie',
       privacy: groupPrivacy,
       creator: req.userDB._id,
@@ -587,10 +583,10 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (type !== undefined && ['club', 'amis'].includes(type)) {
       group.type = type;
     }
-    if (city !== undefined && typeof city === 'string' && city.trim()) {
+    if (city !== undefined && typeof city === 'string') {
       group.city = city.trim();
     }
-    if (governorate !== undefined && typeof governorate === 'string' && governorate.trim()) {
+    if (governorate !== undefined && typeof governorate === 'string') {
       group.governorate = governorate.trim();
     }
     if (privacy !== undefined && ['public', 'private'].includes(privacy)) {

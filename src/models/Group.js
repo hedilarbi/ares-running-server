@@ -30,12 +30,12 @@ const GroupSchema = new mongoose.Schema(
     },
     city: {
       type: String,
-      required: true,
+      default: '',
       trim: true,
     },
     governorate: {
       type: String,
-      required: true,
+      default: '',
       trim: true,
     },
     country: {
