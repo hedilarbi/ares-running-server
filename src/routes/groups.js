@@ -10,6 +10,7 @@ const GroupChallengeParticipant = require('../models/GroupChallengeParticipant')
 const GroupReport = require('../models/GroupReport');
 const Run = require('../models/Run');
 const User = require('../models/User');
+const { sendNotifications } = require('../services/notificationService');
 const { authenticateToken } = require('../middleware/auth');
 const { getPeriodId } = require('../utils/time');
 
@@ -1534,6 +1535,37 @@ router.post('/:id/challenges', authenticateToken, async (req, res) => {
       status: 'en_cours',
       joinedAt: new Date(),
     });
+
+    // Notify all active group members (except the creator who just created it)
+    try {
+      const activeMembers = await GroupMember.find({
+        group: group._id,
+        status: 'active',
+        user: { $ne: req.userDB._id },
+      }).select('user').lean();
+
+      if (activeMembers.length > 0) {
+        const notifs = activeMembers.map((m) => ({
+          recipient: m.user,
+          sender: req.userDB._id,
+          type: 'group_challenge_created',
+          title: `Nouveau défi dans ${group.name} !`,
+          body: `${req.userDB.name || req.userDB.pseudo || "L'admin"} a lancé le défi « ${challenge.title} ». Rejoins-le dès maintenant !`,
+          data: {
+            groupId: group._id.toString(),
+            challengeId: challenge._id.toString(),
+            url: `/groups/${group._id.toString()}`,
+          },
+        }));
+
+        // Run asynchronously without blocking response
+        sendNotifications(notifs).catch((err) =>
+          console.error('Erreur sendNotifications group challenge:', err)
+        );
+      }
+    } catch (notifErr) {
+      console.warn('Erreur préparation notifications défi de groupe:', notifErr.message);
+    }
 
     return res.status(201).json({ challenge });
   } catch (error) {

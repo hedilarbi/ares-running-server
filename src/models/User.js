@@ -96,6 +96,11 @@ const UserSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User' 
   }],
+  pushToken: {
+    type: String,
+    default: '',
+    trim: true,
+  },
   
   createdAt: { 
     type: Date, 

@@ -19,6 +19,7 @@ require('./src/models/GroupPostComment');
 require('./src/models/GroupChallenge');
 require('./src/models/GroupChallengeParticipant');
 require('./src/models/GroupReport');
+require('./src/models/Notification');
 
 const connectDB = require('./src/db');
 const authRoutes = require('./src/routes/auth');
@@ -27,6 +28,7 @@ const userRoutes = require('./src/routes/user');
 const runRoutes = require('./src/routes/runs');
 const defiRoutes = require('./src/routes/defis');
 const groupRoutes = require('./src/routes/groups');
+const notificationRoutes = require('./src/routes/notifications');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -85,6 +87,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/runs', runRoutes);
 app.use('/api/defis', defiRoutes);
 app.use('/api/groups', groupRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Health check endpoint
 app.get('/', (req, res) => {
