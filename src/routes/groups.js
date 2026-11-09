@@ -685,6 +685,23 @@ router.post('/:id/join', authenticateToken, async (req, res) => {
     const activeCount = await GroupMember.countDocuments({ group: group._id, status: 'active' });
     await Group.updateOne({ _id: group._id }, { $set: { memberCount: activeCount } });
 
+    // If joining a private group, notify the group creator about the pending request
+    if (nextStatus === 'pending_request' && !group.creator.equals(req.userDB._id)) {
+      sendNotifications([
+        {
+          recipient: group.creator,
+          sender: req.userDB._id,
+          type: 'group_join_requested',
+          title: `Demande d'adhésion : ${group.name}`,
+          body: `${req.userDB.name || req.userDB.pseudo || 'Un coureur'} souhaite rejoindre votre groupe.`,
+          data: {
+            groupId: group._id.toString(),
+            url: `/groups/${group._id.toString()}`,
+          },
+        },
+      ]).catch((err) => console.error('Erreur notif group_join_requested:', err));
+    }
+
     return res.status(200).json({ status: nextStatus, memberCount: activeCount });
   } catch (error) {
     console.error('Erreur POST /api/groups/:id/join:', error);
@@ -764,6 +781,21 @@ router.post('/:id/invite', authenticateToken, async (req, res) => {
       invitedBy: req.userDB._id,
       autoContributeKm: true,
     });
+
+    // Notify the invited runner
+    sendNotifications([
+      {
+        recipient: userId,
+        sender: req.userDB._id,
+        type: 'group_invitation',
+        title: `Invitation au groupe ${group.name}`,
+        body: `${req.userDB.name || req.userDB.pseudo || "L'administrateur"} vous a invité à rejoindre son groupe.`,
+        data: {
+          groupId: group._id.toString(),
+          url: `/groups/${group._id.toString()}`,
+        },
+      },
+    ]).catch((err) => console.error('Erreur notif group_invitation:', err));
 
     return res.status(201).json({ status: 'invited' });
   } catch (error) {
@@ -859,6 +891,21 @@ router.patch('/:id/members/:userId', authenticateToken, async (req, res) => {
       if (!member) {
         return res.status(404).json({ error: 'Demande introuvable.' });
       }
+
+      // Notify the accepted member
+      sendNotifications([
+        {
+          recipient: req.params.userId,
+          sender: req.userDB._id,
+          type: 'group_join_accepted',
+          title: `Bienvenue dans ${group.name} !`,
+          body: `Votre demande d'adhésion a été acceptée par l'administrateur. Vos courses comptent désormais pour le groupe.`,
+          data: {
+            groupId: group._id.toString(),
+            url: `/groups/${group._id.toString()}`,
+          },
+        },
+      ]).catch((err) => console.error('Erreur notif group_join_accepted:', err));
     } else {
       if (group.creator.equals(req.params.userId)) {
         return res.status(400).json({ error: 'Le créateur ne peut pas se retirer lui-même.' });

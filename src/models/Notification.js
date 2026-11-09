@@ -17,8 +17,9 @@ const NotificationSchema = new mongoose.Schema(
       type: String,
       enum: [
         'group_challenge_created',
-        'group_invitation',
+        'group_join_requested',
         'group_join_accepted',
+        'group_invitation',
         'run_liked',
         'run_commented',
       ],
