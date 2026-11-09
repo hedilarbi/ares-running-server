@@ -5,6 +5,7 @@ const UserBadge = require('../models/UserBadge');
 const UserDefi = require('../models/UserDefi');
 const Run = require('../models/Run');
 const { getLevelProgress } = require('../utils/levels');
+const { processGroupRunContributions } = require('./groupContributionsService');
 const {
   APP_TIMEZONE,
   DAY_MS,
@@ -299,6 +300,7 @@ async function processRunRewards(userId, run) {
 
   await awardBadges(userId, run);
   await advanceDefis(userId, run);
+  await processGroupRunContributions(userId, run);
 
   const [badgeRows, defiRows] = await Promise.all([
     UserBadge.find({ user: userId, sourceRun: run._id }).populate('badge').lean(),

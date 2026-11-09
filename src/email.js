@@ -2,25 +2,38 @@ const nodemailer = require('nodemailer');
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  }
-});
+const transporter = process.env.SMTP_HOST
+  ? nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: Number(process.env.SMTP_PORT) === 465,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    })
+  : nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_APP_PASSWORD,
+      },
+    });
+
+const getSenderAddress = () =>
+  process.env.EMAIL_FROM || `"ARES Running" <${process.env.GMAIL_USER}>`;
 
 const sendOTPEmail = async (email, otpCode) => {
   try {
     const mailOptions = {
-      from: `"ARES Running" <${process.env.GMAIL_USER}>`,
+      from: getSenderAddress(),
       to: email,
       subject: 'ARES Running - Votre code de vérification',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eceef1; border-radius: 10px; background-color: #fafbfc;">
           <div style="text-align: center; margin-bottom: 20px;">
             <h2 style="color: #171b26; font-family: 'Archivo', sans-serif; font-style: italic; font-weight: 900; margin: 0;">ARES <span style="color: #a3d139;">RUNNING</span></h2>
-            <p style="font-size: 14px; color: #9aa0ac; margin: 5px 0 0;">Prototype MVP</p>
+            <p style="font-size: 14px; color: #9aa0ac; margin: 5px 0 0;">Vérification de votre compte</p>
           </div>
           <div style="padding: 20px; background-color: #ffffff; border-radius: 8px; border: 1px solid #e3e6ea; text-align: center;">
             <p style="font-size: 16px; color: #171b26; margin-bottom: 10px;">Bonjour,</p>
@@ -49,7 +62,7 @@ const sendOTPEmail = async (email, otpCode) => {
 const sendResetPasswordOTPEmail = async (email, otpCode) => {
   try {
     const mailOptions = {
-      from: `"ARES Running" <${process.env.GMAIL_USER}>`,
+      from: getSenderAddress(),
       to: email,
       subject: 'ARES Running - Réinitialisation de mot de passe',
       html: `

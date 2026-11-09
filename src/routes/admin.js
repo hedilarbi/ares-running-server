@@ -7,9 +7,20 @@ const Badge = require('../models/Badge');
 const UserBadge = require('../models/UserBadge');
 const Defi = require('../models/Defi');
 const UserDefi = require('../models/UserDefi');
+const RunComment = require('../models/RunComment');
+const Group = require('../models/Group');
+const GroupMember = require('../models/GroupMember');
+const GroupRunContribution = require('../models/GroupRunContribution');
+const GroupPost = require('../models/GroupPost');
+const GroupPostComment = require('../models/GroupPostComment');
+const GroupChallenge = require('../models/GroupChallenge');
+const GroupChallengeParticipant = require('../models/GroupChallengeParticipant');
+const GroupReport = require('../models/GroupReport');
 const { generateToken, authenticateToken, isAdmin } = require('../middleware/auth');
 const { deleteImage, uploadImage } = require('../image-storage');
+const { deleteRunPhoto } = require('../run-photo-storage');
 const { completeReachedDefi, revokeAwardedXp } = require('../services/rewardsService');
+const { revokeGroupRunContributions } = require('../services/groupContributionsService');
 const { getPeriodId } = require('../utils/time');
 
 const router = express.Router();
@@ -670,6 +681,212 @@ router.delete('/defis/:id', authenticateToken, isAdmin, async (req, res) => {
   } catch (error) {
     console.error('Admin delete defi error:', error);
     return res.status(500).json({ error: 'Une erreur est survenue lors de la suppression du défi.' });
+  }
+});
+
+// 16. INVALIDATE / DELETE A RUN (ADMIN ONLY — Section 9)
+router.delete('/runs/:id', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const run = await Run.findById(req.params.id).lean();
+    if (!run) {
+      return res.status(404).json({ error: 'Course introuvable.' });
+    }
+
+    await revokeGroupRunContributions(run);
+    if (run.xpAwarded > 0) {
+      await revokeAwardedXp([{ user: run.user, xpAwarded: run.xpAwarded }], 0);
+    }
+
+    await Promise.all([
+      RunComment.deleteMany({ run: run._id }),
+      Run.deleteOne({ _id: run._id }),
+    ]);
+
+    if (run.photo?.path) {
+      await deleteRunPhoto(run.photo.path).catch(() => {});
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (error) {
+    console.error('Admin delete run error:', error);
+    return res.status(500).json({ error: 'Erreur lors de la suppression de la course.' });
+  }
+});
+
+// 17. LIST GROUPS & PENDING REPORTS SUMMARY (ADMIN ONLY)
+router.get('/groups', authenticateToken, isAdmin, async (req, res) => {
+  const { search, type, privacy } = req.query;
+  const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '15', 10), 1), 50);
+  const skip = (page - 1) * limit;
+
+  try {
+    const query = {};
+    if (type && ['club', 'amis'].includes(String(type))) {
+      query.type = String(type);
+    }
+    if (privacy && ['public', 'private'].includes(String(privacy))) {
+      query.privacy = String(privacy);
+    }
+    if (search && typeof search === 'string' && search.trim()) {
+      const regex = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      query.$or = [{ name: regex }, { city: regex }, { governorate: regex }];
+    }
+
+    const [groups, total, pendingReportsCount] = await Promise.all([
+      Group.find(query)
+        .populate('creator', 'name pseudo email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Group.countDocuments(query),
+      GroupReport.countDocuments({ status: 'pending' }),
+    ]);
+
+    const totalPages = Math.max(Math.ceil(total / limit), 1);
+
+    return res.status(200).json({
+      groups,
+      pendingReportsCount,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+    });
+  } catch (error) {
+    console.error('Admin list groups error:', error);
+    return res.status(500).json({ error: 'Erreur lors de la récupération des groupes.' });
+  }
+});
+
+// 18. GET GROUP DETAILS WITH MEMBERS, CHALLENGES, POSTS & REPORTS (ADMIN ONLY)
+router.get('/groups/:id', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const group = await Group.findById(req.params.id)
+      .populate('creator', 'name pseudo email photo')
+      .lean();
+    if (!group) {
+      return res.status(404).json({ error: 'Groupe introuvable.' });
+    }
+
+    const [members, challenges, posts, reports] = await Promise.all([
+      GroupMember.find({ group: group._id })
+        .populate('user', 'name pseudo email photo city governorate level')
+        .sort({ role: 1, joinedAt: 1 })
+        .lean(),
+      GroupChallenge.find({ group: group._id }).sort({ createdAt: -1 }).lean(),
+      GroupPost.find({ group: group._id })
+        .populate('author', 'name pseudo email photo')
+        .populate('run', '_id distanceMetres durationSeconds startedAt')
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean(),
+      GroupReport.find({ group: group._id })
+        .populate('reporter', 'name pseudo email')
+        .populate({
+          path: 'post',
+          populate: { path: 'author', select: 'name pseudo email' },
+        })
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+
+    return res.status(200).json({
+      group,
+      members,
+      challenges,
+      posts,
+      reports,
+    });
+  } catch (error) {
+    console.error('Admin get group details error:', error);
+    return res.status(500).json({ error: 'Erreur lors de la récupération du groupe.' });
+  }
+});
+
+// 19. DELETE A GROUP (ADMIN ONLY)
+router.delete('/groups/:id', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const group = await Group.findById(req.params.id).lean();
+    if (!group) {
+      return res.status(404).json({ error: 'Groupe introuvable.' });
+    }
+
+    await Promise.all([
+      GroupMember.deleteMany({ group: group._id }),
+      GroupRunContribution.deleteMany({ group: group._id }),
+      GroupPostComment.deleteMany({ group: group._id }),
+      GroupPost.deleteMany({ group: group._id }),
+      GroupChallengeParticipant.deleteMany({ group: group._id }),
+      GroupChallenge.deleteMany({ group: group._id }),
+      GroupReport.deleteMany({ group: group._id }),
+      Group.deleteOne({ _id: group._id }),
+    ]);
+
+    return res.status(200).json({ ok: true });
+  } catch (error) {
+    console.error('Admin delete group error:', error);
+    return res.status(500).json({ error: 'Erreur lors de la suppression du groupe.' });
+  }
+});
+
+// 20. DELETE A GROUP POST / RESOLVE REPORT (ADMIN ONLY)
+router.delete('/groups/:id/posts/:postId', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const post = await GroupPost.findOne({ _id: req.params.postId, group: req.params.id }).lean();
+    if (!post) {
+      return res.status(404).json({ error: 'Publication introuvable.' });
+    }
+
+    await Promise.all([
+      GroupPostComment.deleteMany({ post: post._id }),
+      GroupReport.updateMany(
+        { post: post._id },
+        { $set: { status: 'resolved', resolvedBy: req.userDB._id, resolvedAt: new Date() } },
+      ),
+      GroupPost.deleteOne({ _id: post._id }),
+    ]);
+
+    return res.status(200).json({ ok: true });
+  } catch (error) {
+    console.error('Admin delete group post error:', error);
+    return res.status(500).json({ error: 'Erreur lors de la suppression de la publication.' });
+  }
+});
+
+router.patch('/reports/:reportId', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const { status, deletePost } = req.body || {};
+    if (!['resolved', 'dismissed'].includes(status)) {
+      return res.status(400).json({ error: 'Statut invalide.' });
+    }
+
+    const report = await GroupReport.findById(req.params.reportId);
+    if (!report) {
+      return res.status(404).json({ error: 'Signalement introuvable.' });
+    }
+
+    if (deletePost && report.post) {
+      await Promise.all([
+        GroupPostComment.deleteMany({ post: report.post }),
+        GroupPost.deleteOne({ _id: report.post }),
+      ]);
+    }
+
+    report.status = status;
+    report.resolvedBy = req.userDB._id;
+    report.resolvedAt = new Date();
+    await report.save();
+
+    return res.status(200).json({ report });
+  } catch (error) {
+    console.error('Admin patch report error:', error);
+    return res.status(500).json({ error: 'Erreur lors du traitement du signalement.' });
   }
 });
 

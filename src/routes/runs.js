@@ -10,7 +10,9 @@ const {
   hasPendingRewards,
   processPendingRewards,
   processRunRewards,
+  revokeAwardedXp,
 } = require('../services/rewardsService');
+const { revokeGroupRunContributions } = require('../services/groupContributionsService');
 
 const router = express.Router();
 
@@ -733,6 +735,34 @@ router.patch('/:id', authenticateToken, async (req, res) => {
     if (!run) throw apiError(404, 'RUN_NOT_FOUND', 'Course introuvable.');
 
     return res.status(200).json({ run: serializeRun(run, { includeRoute: false }) });
+  } catch (error) {
+    return sendApiError(res, error);
+  }
+});
+
+// DELETE /api/runs/:id — the owner deletes a run; removes it from group rankings,
+// challenges, posts, and revokes awarded XP.
+router.delete('/:id', authenticateToken, async (req, res) => {
+  try {
+    assertObjectId(req.params.id, 'INVALID_RUN_ID', "L'identifiant de la course est invalide.");
+    const run = await Run.findOne({ _id: req.params.id, user: req.userDB._id }).lean();
+    if (!run) throw apiError(404, 'RUN_NOT_FOUND', 'Course introuvable.');
+
+    await revokeGroupRunContributions(run);
+    if (run.xpAwarded > 0) {
+      await revokeAwardedXp([{ user: run.user, xpAwarded: run.xpAwarded }], 0);
+    }
+
+    await Promise.all([
+      RunComment.deleteMany({ run: run._id }),
+      Run.deleteOne({ _id: run._id }),
+    ]);
+
+    if (run.photo?.path) {
+      await deleteRunPhoto(run.photo.path).catch(() => {});
+    }
+
+    return res.status(200).json({ deleted: true });
   } catch (error) {
     return sendApiError(res, error);
   }

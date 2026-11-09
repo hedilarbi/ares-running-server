@@ -3,10 +3,23 @@ const bcrypt = require('bcrypt');
 const User = require('../models/User');
 const { verifyFirebaseToken } = require('../firebase-verifier');
 const { generateToken, authenticateToken } = require('../middleware/auth');
+const { createRateLimiter } = require('../middleware/rateLimit');
 const { sendOTPEmail, sendResetPasswordOTPEmail } = require('../email');
 const { uploadBase64ToFirebase } = require('../storage');
 
 const router = express.Router();
+
+const otpVerifyLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  message: 'Trop de tentatives de vérification. Veuillez réessayer dans 10 minutes.',
+});
+
+const authAttemptLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  message: 'Trop de tentatives de connexion. Veuillez réessayer dans 10 minutes.',
+});
 
 // Helper to generate 6-digit OTP
 const generateOTP = () => {
@@ -14,7 +27,7 @@ const generateOTP = () => {
 };
 
 // 1. REGISTER
-router.post('/register', async (req, res) => {
+router.post('/register', authAttemptLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -61,8 +74,8 @@ router.post('/register', async (req, res) => {
 
     await newUser.save();
     
-    // Send email asynchronously so API responds quickly
-    sendOTPEmail(email, otpCode);
+    // Await email delivery so serverless environments (e.g. Vercel) don't freeze before SMTP completes
+    await sendOTPEmail(email, otpCode);
 
     return res.status(201).json({
       message: 'Inscription réussie. Code de vérification envoyé par email.',
@@ -75,7 +88,7 @@ router.post('/register', async (req, res) => {
 });
 
 // 2. VERIFY OTP
-router.post('/verify-otp', async (req, res) => {
+router.post('/verify-otp', otpVerifyLimiter, async (req, res) => {
   const { email, otpCode } = req.body;
 
   if (!email || !otpCode) {
@@ -138,7 +151,7 @@ router.post('/verify-otp', async (req, res) => {
 });
 
 // 3. LOGIN
-router.post('/login', async (req, res) => {
+router.post('/login', authAttemptLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -163,7 +176,7 @@ router.post('/login', async (req, res) => {
       user.otpCode = otpCode;
       user.otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
       await user.save();
-      sendOTPEmail(email, otpCode);
+      await sendOTPEmail(email, otpCode);
 
       return res.status(403).json({
         error: 'Veuillez vérifier votre adresse email. Un nouveau code vous a été envoyé.',
@@ -403,7 +416,7 @@ router.get('/me', authenticateToken, async (req, res) => {
 });
 
 // 7. FORGOT PASSWORD
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', authAttemptLimiter, async (req, res) => {
   const { email } = req.body;
 
   if (!email) {
@@ -424,7 +437,7 @@ router.post('/forgot-password', async (req, res) => {
     user.otpExpiresAt = otpExpiresAt;
     await user.save();
 
-    sendResetPasswordOTPEmail(email, otpCode);
+    await sendResetPasswordOTPEmail(email, otpCode);
 
     return res.status(200).json({
       message: 'Code de réinitialisation envoyé par e-mail.',
@@ -437,7 +450,7 @@ router.post('/forgot-password', async (req, res) => {
 });
 
 // 8. RESET PASSWORD
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', otpVerifyLimiter, async (req, res) => {
   const { email, otpCode, newPassword } = req.body;
 
   if (!email || !otpCode || !newPassword) {
