@@ -661,7 +661,8 @@ router.post('/:id/join', authenticateToken, async (req, res) => {
       if (existing.status === 'active') {
         return res.status(200).json({ status: 'active', memberCount: group.memberCount });
       }
-      if (existing.status === 'invited' || group.privacy === 'public') {
+      // If the user was officially invited by the group admin, they can accept immediately
+      if (existing.status === 'invited') {
         existing.status = 'active';
         existing.joinedAt = new Date();
         await existing.save();
@@ -672,7 +673,8 @@ router.post('/:id/join', authenticateToken, async (req, res) => {
       return res.status(200).json({ status: existing.status, memberCount: group.memberCount });
     }
 
-    const nextStatus = group.privacy === 'private' ? 'pending_request' : 'active';
+    // Every self-service join request requires group admin approval (pending_request)
+    const nextStatus = 'pending_request';
     await GroupMember.create({
       group: group._id,
       user: req.userDB._id,
@@ -685,8 +687,8 @@ router.post('/:id/join', authenticateToken, async (req, res) => {
     const activeCount = await GroupMember.countDocuments({ group: group._id, status: 'active' });
     await Group.updateOne({ _id: group._id }, { $set: { memberCount: activeCount } });
 
-    // If joining a private group, notify the group creator about the pending request
-    if (nextStatus === 'pending_request' && !group.creator.equals(req.userDB._id)) {
+    // Always notify the group creator about the pending join request
+    if (!group.creator.equals(req.userDB._id)) {
       sendNotifications([
         {
           recipient: group.creator,
