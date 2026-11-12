@@ -68,3 +68,4 @@ const GroupEventSchema = new mongoose.Schema(
 GroupEventSchema.index({ group: 1, date: 1 });
 
 module.exports = mongoose.models.GroupEvent || mongoose.model('GroupEvent', GroupEventSchema);
+
