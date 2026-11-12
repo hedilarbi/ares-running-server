@@ -385,15 +385,29 @@ test('E2E complet : Auth, Courses, Social/Feed, Groupes, Classements, Défis & B
       assert.equal(searchByName.status, 200);
       assert.equal(searchByName.data.groups.length, 2);
 
-      // 3.5 Runner B joins Public Group 1 & Public Group 3 directly
+      // 3.5 Runner B requests to join Public Group 1 & Public Group 3 -> pending_request, admin accepts
       const joinG1 = await jsonReq('POST', `/api/groups/${group1Id}/join`, tokenB);
       assert.equal(joinG1.status, 200);
-      assert.equal(joinG1.data.status, 'active');
-      assert.equal(joinG1.data.memberCount, 2);
+      assert.equal(joinG1.data.status, 'pending_request');
+      const acceptB1 = await jsonReq(
+        'PATCH',
+        `/api/groups/${group1Id}/members/${userBId}`,
+        tokenA,
+        { action: 'accept' },
+      );
+      assert.equal(acceptB1.status, 200);
+      assert.equal(acceptB1.data.memberCount, 2);
 
       const joinG3 = await jsonReq('POST', `/api/groups/${group3SousseId}/join`, tokenB);
       assert.equal(joinG3.status, 200);
-      assert.equal(joinG3.data.status, 'active');
+      assert.equal(joinG3.data.status, 'pending_request');
+      const acceptB3 = await jsonReq(
+        'PATCH',
+        `/api/groups/${group3SousseId}/members/${userBId}`,
+        tokenC,
+        { action: 'accept' },
+      );
+      assert.equal(acceptB3.status, 200);
 
       // 3.6 Runner B requests to join Private Group 2 -> pending_request
       const joinG2 = await jsonReq('POST', `/api/groups/${group2PrivateId}/join`, tokenB);

@@ -19,6 +19,7 @@ require('./src/models/GroupPostComment');
 require('./src/models/GroupChallenge');
 require('./src/models/GroupChallengeParticipant');
 require('./src/models/GroupReport');
+require('./src/models/GroupEvent');
 require('./src/models/Notification');
 
 const connectDB = require('./src/db');

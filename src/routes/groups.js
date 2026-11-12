@@ -7,6 +7,7 @@ const GroupPost = require('../models/GroupPost');
 const GroupPostComment = require('../models/GroupPostComment');
 const GroupChallenge = require('../models/GroupChallenge');
 const GroupChallengeParticipant = require('../models/GroupChallengeParticipant');
+const GroupEvent = require('../models/GroupEvent');
 const GroupReport = require('../models/GroupReport');
 const Run = require('../models/Run');
 const User = require('../models/User');
@@ -1105,12 +1106,12 @@ router.get('/:id/feed', authenticateToken, async (req, res) => {
     const myIdStr = req.userDB._id.toString();
 
     const items = posts
-      .filter((p) => p.run && p.author)
+      .filter((p) => p.author)
       .map((p) => ({
         id: p._id.toString(),
         groupId: group._id.toString(),
         caption: p.caption || '',
-        photoUrl: p.photoUrl || p.run.photo?.url || null,
+        photoUrl: p.photoUrl || p.run?.photo?.url || null,
         createdAt: p.createdAt,
         likeCount: p.likeCount || 0,
         likedByMe: (p.likes || []).some((id) => id.toString() === myIdStr),
@@ -1123,14 +1124,16 @@ router.get('/:id/feed', authenticateToken, async (req, res) => {
           photo: p.author.photo || null,
           city: p.author.city || '',
         },
-        run: {
-          id: p.run._id.toString(),
-          startedAt: p.run.startedAt,
-          distanceMetres: p.run.distanceMetres,
-          durationSeconds: p.run.durationSeconds,
-          averagePaceSecondsPerKm: p.run.averagePaceSecondsPerKm,
-          caloriesKcal: p.run.caloriesKcal,
-        },
+        run: p.run
+          ? {
+              id: p.run._id.toString(),
+              startedAt: p.run.startedAt,
+              distanceMetres: p.run.distanceMetres,
+              durationSeconds: p.run.durationSeconds,
+              averagePaceSecondsPerKm: p.run.averagePaceSecondsPerKm,
+              caloriesKcal: p.run.caloriesKcal,
+            }
+          : null,
       }));
 
     return res.status(200).json({ items });
@@ -1147,52 +1150,69 @@ router.post('/:id/posts', authenticateToken, async (req, res) => {
     }
 
     const { runId, caption, photoUrl } = req.body || {};
-    if (!isValidId(runId)) {
-      return res.status(400).json({ error: 'Identifiant de course invalide.' });
+    const hasRun = Boolean(runId && isValidId(runId));
+    const trimmedCaption = typeof caption === 'string' ? caption.trim().slice(0, 500) : '';
+    const trimmedPhoto = typeof photoUrl === 'string' ? photoUrl.trim() : '';
+
+    if (!hasRun && !trimmedCaption && !trimmedPhoto) {
+      return res.status(400).json({
+        error: 'Votre publication doit comporter au moins un texte, une photo ou une course.',
+      });
     }
 
-    const [group, membership, run] = await Promise.all([
+    const [group, membership] = await Promise.all([
       Group.findOne({ _id: req.params.id, isActive: true }).lean(),
       GroupMember.findOne({
         group: req.params.id,
         user: req.userDB._id,
         status: 'active',
       }).lean(),
-      Run.findOne({ _id: runId, user: req.userDB._id })
-        .select('_id startedAt durationSeconds distanceMetres averagePaceSecondsPerKm caloriesKcal photo description')
-        .lean(),
     ]);
 
     if (!group) return res.status(404).json({ error: 'Groupe introuvable.' });
     if (!membership) {
-      return res.status(403).json({ error: 'Vous devez être membre du groupe pour partager une course.' });
-    }
-    if (!run) {
-      return res.status(404).json({ error: 'Course introuvable.' });
+      return res.status(403).json({
+        error: 'Vous devez être membre actif du groupe pour publier.',
+      });
     }
 
-    const post = await GroupPost.findOneAndUpdate(
-      { group: group._id, run: run._id },
-      {
-        $setOnInsert: {
-          group: group._id,
-          author: req.userDB._id,
-          run: run._id,
-          showRoute: false,
+    let run = null;
+    if (hasRun) {
+      run = await Run.findOne({ _id: runId, user: req.userDB._id })
+        .select('_id startedAt durationSeconds distanceMetres averagePaceSecondsPerKm caloriesKcal photo description')
+        .lean();
+      if (!run) {
+        return res.status(404).json({ error: 'Course introuvable.' });
+      }
+
+      const post = await GroupPost.findOneAndUpdate(
+        { group: group._id, run: run._id },
+        {
+          $setOnInsert: {
+            group: group._id,
+            author: req.userDB._id,
+            run: run._id,
+            showRoute: false,
+          },
+          $set: {
+            caption: trimmedCaption || run.description || '',
+            photoUrl: trimmedPhoto || run.photo?.url || '',
+          },
         },
-        $set: {
-          caption:
-            typeof caption === 'string'
-              ? caption.trim().slice(0, 500)
-              : run.description || '',
-          photoUrl:
-            typeof photoUrl === 'string' && photoUrl.trim()
-              ? photoUrl.trim()
-              : run.photo?.url || '',
-        },
-      },
-      { upsert: true, returnDocument: 'after' },
-    );
+        { upsert: true, returnDocument: 'after' },
+      );
+      return res.status(201).json({ postId: post._id.toString() });
+    }
+
+    // Free post (thought / photo without run)
+    const post = await GroupPost.create({
+      group: group._id,
+      author: req.userDB._id,
+      run: null,
+      caption: trimmedCaption,
+      photoUrl: trimmedPhoto,
+      showRoute: false,
+    });
 
     return res.status(201).json({ postId: post._id.toString() });
   } catch (error) {
@@ -1699,6 +1719,249 @@ router.delete('/:id/challenges/:challengeId', authenticateToken, async (req, res
     return res.status(200).json({ deleted: true });
   } catch (error) {
     return res.status(500).json({ error: 'Erreur lors de la suppression du défi.' });
+  }
+});
+
+// ==========================================
+// GROUP EVENTS
+// ==========================================
+
+router.get('/:id/events', authenticateToken, async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).json({ error: 'Identifiant invalide.' });
+    }
+
+    const group = await Group.findById(req.params.id).lean();
+    if (!group) return res.status(404).json({ error: 'Groupe introuvable.' });
+
+    const events = await GroupEvent.find({ group: group._id, isActive: true })
+      .sort({ date: 1 })
+      .populate('creator', 'name pseudo photo')
+      .lean();
+
+    const isAdmin = group.creator.equals(req.userDB._id) || req.userDB.role === 'admin';
+
+    const formattedEvents = events.map((ev) => {
+      const isParticipant =
+        Array.isArray(ev.participants) &&
+        ev.participants.some((p) => p && p.toString() === req.userDB._id.toString());
+      return {
+        id: ev._id.toString(),
+        title: ev.title,
+        description: ev.description || '',
+        date: ev.date,
+        meetingPoint: ev.meetingPoint || '',
+        targetDistanceKm: ev.targetDistanceKm || 0,
+        targetPace: ev.targetPace || '',
+        participantCount: ev.participantCount || (ev.participants ? ev.participants.length : 0),
+        participating: isParticipant,
+        canDelete:
+          isAdmin ||
+          (ev.creator &&
+            ev.creator._id &&
+            ev.creator._id.toString() === req.userDB._id.toString()),
+        creator: ev.creator
+          ? {
+              id: ev.creator._id.toString(),
+              name: ev.creator.name || ev.creator.pseudo || 'Admin',
+              pseudo: ev.creator.pseudo || '',
+              photo: ev.creator.photo || null,
+            }
+          : null,
+        createdAt: ev.createdAt,
+      };
+    });
+
+    return res.status(200).json({ events: formattedEvents });
+  } catch (error) {
+    console.error('Erreur GET /api/groups/:id/events:', error);
+    return res.status(500).json({ error: 'Erreur lors du chargement des événements.' });
+  }
+});
+
+router.post('/:id/events', authenticateToken, async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).json({ error: 'Identifiant invalide.' });
+    }
+
+    const group = await Group.findById(req.params.id);
+    if (!group) return res.status(404).json({ error: 'Groupe introuvable.' });
+
+    const isAdmin = group.creator.equals(req.userDB._id) || req.userDB.role === 'admin';
+    if (!isAdmin) {
+      return res
+        .status(403)
+        .json({ error: 'Seul l’administrateur du groupe peut créer un événement.' });
+    }
+
+    const {
+      title,
+      description = '',
+      date,
+      meetingPoint = '',
+      targetDistanceKm = 0,
+      targetPace = '',
+    } = req.body || {};
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ error: 'Le titre de l’événement est obligatoire.' });
+    }
+
+    if (!date) {
+      return res.status(400).json({ error: 'La date de l’événement est obligatoire.' });
+    }
+
+    const parsedDate = new Date(date);
+    if (isNaN(parsedDate.getTime())) {
+      return res.status(400).json({ error: 'Date invalide.' });
+    }
+
+    const event = await GroupEvent.create({
+      group: group._id,
+      creator: req.userDB._id,
+      title: title.trim(),
+      description: typeof description === 'string' ? description.trim() : '',
+      date: parsedDate,
+      meetingPoint: typeof meetingPoint === 'string' ? meetingPoint.trim() : '',
+      targetDistanceKm: Math.max(0, parseFloat(targetDistanceKm) || 0),
+      targetPace: typeof targetPace === 'string' ? targetPace.trim() : '',
+      participants: [req.userDB._id],
+      participantCount: 1,
+      isActive: true,
+    });
+
+    try {
+      const activeMembers = await GroupMember.find({
+        group: group._id,
+        status: 'active',
+        user: { $ne: req.userDB._id },
+      })
+        .select('user')
+        .lean();
+
+      if (activeMembers.length > 0) {
+        const notifs = activeMembers.map((m) => ({
+          recipient: m.user,
+          sender: req.userDB._id,
+          type: 'group_event_created',
+          title: `Nouvel événement dans ${group.name} !`,
+          body: `${req.userDB.name || req.userDB.pseudo || "L'admin"} a programmé une sortie : « ${event.title} ».`,
+          data: {
+            groupId: group._id.toString(),
+            eventId: event._id.toString(),
+            url: `/groups/${group._id.toString()}`,
+          },
+        }));
+
+        sendNotifications(notifs).catch((err) =>
+          console.error('Erreur sendNotifications group event:', err)
+        );
+      }
+    } catch (notifErr) {
+      console.warn('Erreur préparation notifications événement de groupe:', notifErr.message);
+    }
+
+    return res.status(201).json({
+      event: {
+        id: event._id.toString(),
+        title: event.title,
+        description: event.description,
+        date: event.date,
+        meetingPoint: event.meetingPoint,
+        targetDistanceKm: event.targetDistanceKm,
+        targetPace: event.targetPace,
+        participantCount: 1,
+        participating: true,
+        canDelete: true,
+        creator: {
+          id: req.userDB._id.toString(),
+          name: req.userDB.name || req.userDB.pseudo || 'Admin',
+          pseudo: req.userDB.pseudo || '',
+          photo: req.userDB.photo || null,
+        },
+        createdAt: event.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error('Erreur POST /api/groups/:id/events:', error);
+    return res.status(500).json({ error: 'Erreur lors de la création de l’événement.' });
+  }
+});
+
+router.post('/:id/events/:eventId/rsvp', authenticateToken, async (req, res) => {
+  try {
+    if (!isValidId(req.params.id) || !isValidId(req.params.eventId)) {
+      return res.status(400).json({ error: 'Identifiant invalide.' });
+    }
+
+    const [group, event] = await Promise.all([
+      Group.findById(req.params.id).lean(),
+      GroupEvent.findOne({ _id: req.params.eventId, group: req.params.id, isActive: true }),
+    ]);
+
+    if (!group || !event) {
+      return res.status(404).json({ error: 'Événement introuvable.' });
+    }
+
+    const membership = await GroupMember.findOne({
+      group: group._id,
+      user: req.userDB._id,
+      status: 'active',
+    }).lean();
+
+    if (!membership && !group.creator.equals(req.userDB._id)) {
+      return res.status(403).json({ error: 'Vous devez être membre du groupe pour participer.' });
+    }
+
+    const isParticipating = event.participants.some((p) => p && p.equals(req.userDB._id));
+
+    if (isParticipating) {
+      event.participants = event.participants.filter((p) => !p.equals(req.userDB._id));
+      event.participantCount = Math.max(0, (event.participantCount || 1) - 1);
+    } else {
+      event.participants.push(req.userDB._id);
+      event.participantCount = (event.participantCount || 0) + 1;
+    }
+
+    await event.save();
+
+    return res.status(200).json({
+      participating: !isParticipating,
+      participantCount: event.participantCount,
+    });
+  } catch (error) {
+    console.error('Erreur RSVP group event:', error);
+    return res.status(500).json({ error: 'Erreur lors de la mise à jour de la participation.' });
+  }
+});
+
+router.delete('/:id/events/:eventId', authenticateToken, async (req, res) => {
+  try {
+    if (!isValidId(req.params.id) || !isValidId(req.params.eventId)) {
+      return res.status(400).json({ error: 'Identifiant invalide.' });
+    }
+
+    const group = await Group.findById(req.params.id).lean();
+    if (!group) return res.status(404).json({ error: 'Groupe introuvable.' });
+
+    const event = await GroupEvent.findOne({ _id: req.params.eventId, group: group._id });
+    if (!event) return res.status(404).json({ error: 'Événement introuvable.' });
+
+    const isAdmin = group.creator.equals(req.userDB._id) || req.userDB.role === 'admin';
+    const isCreator = event.creator.equals(req.userDB._id);
+
+    if (!isAdmin && !isCreator) {
+      return res.status(403).json({ error: 'Non autorisé à supprimer cet événement.' });
+    }
+
+    await GroupEvent.deleteOne({ _id: event._id });
+
+    return res.status(200).json({ deleted: true });
+  } catch (error) {
+    console.error('Erreur DELETE group event:', error);
+    return res.status(500).json({ error: 'Erreur lors de la suppression de l’événement.' });
   }
 });
 

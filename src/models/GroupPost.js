@@ -17,7 +17,7 @@ const GroupPostSchema = new mongoose.Schema(
     run: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Run',
-      required: true,
+      default: null,
       index: true,
     },
     caption: {
@@ -53,8 +53,11 @@ const GroupPostSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// A run is only shared once per group.
-GroupPostSchema.index({ group: 1, run: 1 }, { unique: true });
+// A run is only shared once per group (sparse so posts without a run don't collide).
+GroupPostSchema.index(
+  { group: 1, run: 1 },
+  { unique: true, partialFilterExpression: { run: { $type: 'objectId' } } },
+);
 GroupPostSchema.index({ group: 1, createdAt: -1 });
 
 module.exports = mongoose.models.GroupPost || mongoose.model('GroupPost', GroupPostSchema);
