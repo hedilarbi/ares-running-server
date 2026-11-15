@@ -87,6 +87,17 @@ const seedDefis = async () => {
       const now = new Date();
       const inDays = (days) => new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
 
+      const defaultImage = {
+        url: 'https://images.unsplash.com/photo-1452626038306-9aae5e071dd3?auto=format&fit=crop&w=600&q=80',
+        path: 'starter/default-defi.jpg',
+        metadata: {
+          contentType: 'image/jpeg',
+          sizeBytes: 40960,
+          width: 600,
+          height: 400,
+        },
+      };
+
       await Defi.insertMany([
         {
           title: 'Courir 20 km cette semaine',
@@ -94,6 +105,7 @@ const seedDefis = async () => {
           kind: 'individuel',
           goalType: 'distance',
           goalValue: 20_000,
+          image: defaultImage,
           startAt: now,
           endAt: inDays(7),
           xpReward: 300,
@@ -104,6 +116,7 @@ const seedDefis = async () => {
           kind: 'individuel',
           goalType: 'nb_courses',
           goalValue: 3,
+          image: defaultImage,
           startAt: now,
           endAt: inDays(7),
           xpReward: 150,
@@ -114,6 +127,7 @@ const seedDefis = async () => {
           kind: 'individuel',
           goalType: 'distance',
           goalValue: 100_000,
+          image: defaultImage,
           startAt: now,
           endAt: inDays(30),
           xpReward: 800,
