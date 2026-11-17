@@ -4,6 +4,7 @@ const User = require('../models/User');
 const Badge = require('../models/Badge');
 const UserBadge = require('../models/UserBadge');
 const { authenticateToken } = require('../middleware/auth');
+const { deleteUserAccount } = require('../services/accountDeletionService');
 
 // GET /api/users/suggestions
 router.get('/suggestions', authenticateToken, async (req, res) => {
@@ -295,6 +296,25 @@ const relationList = (field) => async (req, res) => {
     return res.status(500).json({ error: 'Erreur serveur.' });
   }
 };
+
+// DELETE /api/users/me — permanently deletes the authenticated user's account
+// and all their data. Body must contain { confirm: "SUPPRIMER" } so a stray
+// request cannot wipe an account.
+router.delete('/me', authenticateToken, async (req, res) => {
+  if (req.body?.confirm !== 'SUPPRIMER') {
+    return res.status(400).json({ error: 'Confirmation de suppression manquante.' });
+  }
+  if (req.userDB.role === 'admin') {
+    return res.status(403).json({ error: 'Un compte administrateur ne peut pas être supprimé depuis l’application.' });
+  }
+  try {
+    await deleteUserAccount(req.userDB);
+    return res.status(200).json({ deleted: true });
+  } catch (error) {
+    console.error('Erreur DELETE /api/users/me:', error);
+    return res.status(500).json({ error: 'Erreur lors de la suppression du compte. Réessaie plus tard.' });
+  }
+});
 
 router.get('/:id/followers', authenticateToken, relationList('followers'));
 router.get('/:id/following', authenticateToken, relationList('following'));
